@@ -23,6 +23,7 @@ source-repository head
 library
   ghc-options:         -Wall
   exposed-modules:     Network.MQTT.Client,
+                       Network.MQTT.NClient,
                        Network.MQTT.Message,
                        Network.MQTT.Trie,
                        Network.MQTT.Broker,
@@ -31,6 +32,8 @@ library
                        Network.MQTT.Broker.Server,
                        Network.MQTT.Broker.Session
   other-modules:       Control.Concurrent.InterruptibleLock,
+                       Control.Concurrent.Broadcast,
+                       Network.Transceiver,
                        Network.MQTT.Message.QoS,
                        Network.MQTT.Message.Topic,
                        Network.MQTT.Broker.Internal,
@@ -38,14 +41,17 @@ library
   build-depends:       async,
                        attoparsec,
                        base >=4.8 && <5,
-                       bytestring,
-                       clock,
                        binary,
-                       text,
+                       bytestring,
+                       case-insensitive,
+                       clock,
                        containers,
                        data-default-class,
+                       network-uri,
+                       socket,
+                       text,
+                       tls,
                        uuid,
-                       case-insensitive,
                        x509,
                        x509-validation,
                        networking
