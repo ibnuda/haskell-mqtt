@@ -11,8 +11,6 @@ import           Control.Monad
 import qualified Data.Binary.Get              as BG
 import qualified Data.ByteString              as BS
 import qualified Data.ByteString.Builder      as BS
-import qualified Data.ByteString.Builder.Extra      as BS
-import qualified Data.ByteString.Lazy         as BL
 import qualified Data.IntMap                  as IM
 import qualified Data.Text                    as T
 import qualified Data.Text.Encoding           as T
@@ -77,21 +75,21 @@ newClient clientConf =
     clientIdentifierCharacterRange = ('a', 'z')
 
 stop :: NT.Closable s => Client s -> IO ()
-stop conf = do
-  thrd <- readMVar (clientThreads conf)
-  putMVar (clientOutput conf) (Left ClientDisconnect)
+stop client = do
+  thrd <- readMVar (clientThreads client)
+  putMVar (clientOutput client) (Left ClientDisconnect)
   wait thrd
 
-subscribe :: Client s -> [(Filter, QoS)] -> IO [Maybe QoS]
-subscribe _ [] = pure []
-subscribe client topics = do
-  response <- newEmptyMVar
-  putMVar (clientOutput client) $ Right $ f response
-  takeMVar response
-  where
-    f response i =
-      let message = ClientSubscribe i topics
-      in (message, OutboundStateNotAcknowledgedSubscribe message response)
+--subscribe :: Client s -> [(Filter, QoS)] -> IO [Maybe QoS]
+--subscribe _ [] = pure []
+--subscribe client topics = do
+--  response <- newEmptyMVar
+--  putMVar (clientOutput client) $ Right $ f response
+--  takeMVar response
+--  where
+--    f resp i =
+--      let message = ClientSubscribe i resp
+--      in (message, OutboundStateNotAcknowledgedSubscribe message resp)
 
 unsubscribe :: Client s -> [Filter] -> IO ()
 unsubscribe _ [] = pure ()
@@ -155,16 +153,16 @@ receiveConnectAcknowledgement session connection = do
         _             -> throwIO ClientExceptionServerLostSession
     f (ServerConnectionRejected reason) =
       throwIO $
-      ClientExceptionProtocolViolation $ "expected CONNACK got " ++ show reason
+      ClientExceptionProtocolViolation $ "Expected CONNACK got " ++ show reason
     f _ =
       throwIO $
-      ClientExceptionProtocolViolation $ "expected CONNACK got something else."
+      ClientExceptionProtocolViolation $ "Expected CONNACK got something else."
 
 maintainConnection ::
      (NT.Data a ~ BS.ByteString, NT.Connectable a, NT.StreamConnection a)
   => Client t1
   -> a
-  -> t2
+  -> BS.ByteString
   -> IO ()
 maintainConnection client connection inp =
   keepAlive client `race_` handleOutput client connection `race_`
@@ -225,50 +223,114 @@ handleOutput client connection = do
     (getMaybeMessage client)
     (NT.sendChunk connection)
 
+handleInput ::
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO b
 handleInput client connection inp
   | BS.null inp = handleInput' client connection =<< NT.receiveChunk connection
   | otherwise = handleInput' client connection inp
 
-handleInput' client connection inp = do
-  decode decoder inp
+handleInput' ::
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO b
+handleInput' client connection input = do
+  decode decoder input
   where
     decoder :: BG.Decoder ServerPacket
     decoder = BG.runGetIncremental serverPacketParser
     decode (BG.Done _leftover consumed clientPacket) inp =
-      f clientPacket >>
-      handleInput' client connection (BS.drop (fromIntegral consumed) inp)
-    decode (BG.Fail _leftover _consumed err) _ =
-      throwIO $ ClientExceptionProtocolViolation err
-    decode (BG.Partial cont) inp = do
+      f clientPacket >> handleInput' client connection (BS.drop (fromIntegral consumed) inp)
+    decode (BG.Fail _leftover _consumed err) _ = throwIO $ ClientExceptionProtocolViolation err
+    decode (BG.Partial cont) i = do
       continued <- NT.receiveChunk connection
       if BS.null continued
         then throwIO ClientExceptionServerLostSession
-        else decode (cont (Just continued)) inp
-    -- to be written.
+        else decode (cont (Just continued)) i
     f :: ServerPacket -> IO ()
-    f (ServerConnectionAccepted (SessionPresent serverSession)) = pure ()
-    takehead =
-      \case
-        (BS.Chunk bs _) -> Just bs
-        _ -> Nothing
-    drophead =
-      \case
-        (BS.Chunk _ bs) -> Just bs
-        _ -> Nothing
+    f (ServerPublish i@(PacketIdentifier p) d m) =
+      case msgQoS m of
+        QoS0 -> do
+          broadcast (clientEventBroadcast client) $ ClientEventReceived m
+        QoS1 -> do
+          broadcast (clientEventBroadcast client) $ ClientEventReceived m
+          putMVar (clientOutput client) $ Left $ ClientPublish i d m
+        QoS2 -> do
+          modifyMVar_ (clientInboundState client) $
+            pure . IM.insert p (InboundStateNotReleasedPublish m)
+    f (ServerPublishAcknowledged (PacketIdentifier i)) = do
+      modifyMVar_ (clientOutboundState client) $ \(is, im) ->
+        case IM.lookup i im of
+          Just (OutboundStateNotAcknowledgedPublish _ promise) ->
+            putMVar promise () >> pure (i : is, IM.delete i im)
+          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBACK, got something else."
+    f (ServerPublishReceived (PacketIdentifier i)) = do
+      modifyMVar_ (clientOutboundState client) $ \(is, im) ->
+        case IM.lookup i im of
+          Just (OutboundStateNotReceivedPublish _ promise) ->
+            pure (is, IM.insert i (OutboundStateNotCompletePublish promise) im)
+          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBREC, got something else."
+    f (ServerPublishRelease (PacketIdentifier i)) = do
+      modifyMVar_ (clientInboundState client) $ \im ->
+        case IM.lookup i im of
+          Nothing -> pure im
+          Just (InboundStateNotReleasedPublish msg) -> do
+            broadcast (clientEventBroadcast client) $ ClientEventReceived msg
+            pure (IM.delete i im)
+    f (ServerPublishComplete (PacketIdentifier i)) = do
+      modifyMVar_ (clientOutboundState client) $ \p@(is, im) ->
+        case IM.lookup i im of
+          Nothing -> pure p
+          Just (OutboundStateNotCompletePublish future) -> do
+            putMVar future ()
+            pure (i : is, IM.delete i im)
+          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBCOMP, got something else."
+    f (ServerSubscribeAcknowledged (PacketIdentifier i) as) =
+      modifyMVar_ (clientOutboundState client) $ \p@(is, im) ->
+        case IM.lookup i im of
+          Nothing -> pure p
+          Just (OutboundStateNotAcknowledgedSubscribe _ promise) -> do
+            putMVar promise as
+            pure (i : is, IM.delete i im)
+          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBCOMP, got something else."
+    f (ServerUnsubscribeAcknowledged (PacketIdentifier i)) =
+      modifyMVar_ (clientOutboundState client) $ \p@(is, im) ->
+        case IM.lookup i im of
+          Nothing -> pure p
+          Just (OutboundStateNotAcknowledgedUnsubscribe _ promise) -> do
+            putMVar promise ()
+            pure (i : is, IM.delete i im)
+          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBCOMP, got something else."
+    f (ServerPingResponse) = pure ()
+    f _ =
+      throwIO $ ClientExceptionProtocolViolation "Unexpected packet type received from the server."
 
 connectTransmitter client connection =
-  NT.connect connection =<< readMVar undefined
+  NT.connect connection =<< takeMVar undefined
 
 handleConnection ::
      (NT.Data a ~ BS.ByteString, NT.StreamConnection a, NT.Connectable a)
-  => Client t
-  -> Bool
+  => SessionPresent
+  -> Client t
   -> a
   -> IO ()
-handleConnection client clientSessionPresent connection = do
+handleConnection (SessionPresent clientSessionPresent) client connection = do
   broadcast (clientEventBroadcast client) ClientEventConnecting
   connectTransmitter client connection
   broadcast (clientEventBroadcast client) ClientEventConnected
   sendConnect client connection
   receiveConnectAcknowledgement clientSessionPresent connection >>=
     maintainConnection client connection
+
+run :: (NT.Data a ~ BS.ByteString, NT.Connectable a, NT.StreamConnection a) => Client a -> IO ()
+run client = join (clientConfigurationNewTransceiver <$> readMVar (clientConfiguration client)) >>= handleConnection (SessionPresent False) client
+
+start ::
+  (NT.Data a ~ BS.ByteString, NT.StreamConnection a,
+   NT.Connectable a) =>
+  Client a -> IO ()
+start client = modifyMVar_ (clientThreads client) $ \p ->
+  poll p >>= \case
+    Nothing -> pure p
+    Just _ -> do
+      broadcast (clientEventBroadcast client) ClientEventStarted
+      async $ forever $ do
+        run client `catch` (\e -> print (e :: SomeException) >> print "RECONNECT")
+        threadDelay 1000000

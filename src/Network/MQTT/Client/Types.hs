@@ -32,7 +32,7 @@ data ClientEvent
   | ClientEventConnected
   | ClientEventPing
   | ClientEventPong
-  | ClientEventReceive Message
+  | ClientEventReceived Message
   | ClientEventDisconnected ClientException
   | ClientEventStopped
   deriving (Eq, Ord, Show)
@@ -56,7 +56,7 @@ newtype InboundState =
 data OutboundState
   = OutboundStateNotAcknowledgedPublish ClientPacket (MVar ())
   | OutboundStateNotReceivedPublish ClientPacket (MVar ())
-  | OutboundStateNotCompletedPublish (MVar ())
+  | OutboundStateNotCompletePublish (MVar ())
   | OutboundStateNotAcknowledgedSubscribe ClientPacket (MVar [Maybe QoS])
   | OutboundStateNotAcknowledgedUnsubscribe ClientPacket (MVar ())
 
