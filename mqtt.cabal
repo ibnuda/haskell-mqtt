@@ -24,6 +24,9 @@ library
   ghc-options:         -Wall
   exposed-modules:     Network.MQTT.Client,
                        Network.MQTT.NClient,
+                       Network.MQTT.Client.Types,
+                       Network.MQTT.Client.Internal,
+                       Network.MQTT.Client.IO,
                        Network.MQTT.Message,
                        Network.MQTT.Trie,
                        Network.MQTT.Broker,
