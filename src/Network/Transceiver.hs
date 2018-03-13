@@ -3,7 +3,6 @@
 {-# LANGUAGE TypeFamilies      #-}
 module Network.Transceiver where
 
-import qualified Control.Exception          as E
 import           Control.Monad
 
 import qualified Data.ByteString            as BS
