@@ -1,7 +1,19 @@
-{-# LANGUAGE GADTs        #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE TypeFamilies #-}
-module Network.MQTT.Client.Internal where
+module Network.MQTT.Client.Internal
+  ( start
+  , stop
+  , subscribe
+  , unsubscribe
+  , publish
+  , validateClientConfiguration
+  , newClient
+  , listenEvents
+  , acceptEvents
+  , ClientConfiguration(..)
+  , Client(..)
+  ) where
 
 import           Control.Concurrent
 import           Control.Concurrent.Async
@@ -57,6 +69,14 @@ uriPassword uri =
     f (Just xs) = Just (Password . T.encodeUtf8 . T.pack $ xs)
     f _         = Nothing
 
+createCredential :: ClientConfiguration t -> Maybe (Username, Maybe Password)
+createCredential clientConf =
+  case uriUsername $ clientConfigurationURI clientConf of
+    Nothing       -> Nothing
+    Just username -> Just (username, password)
+  where
+    password = uriPassword $ clientConfigurationURI clientConf
+
 newClient :: ClientConfiguration t -> IO (Client t)
 newClient clientConf =
   Client
@@ -80,16 +100,16 @@ stop client = do
   putMVar (clientOutput client) (Left ClientDisconnect)
   wait thrd
 
---subscribe :: Client s -> [(Filter, QoS)] -> IO [Maybe QoS]
---subscribe _ [] = pure []
---subscribe client topics = do
---  response <- newEmptyMVar
---  putMVar (clientOutput client) $ Right $ f response
---  takeMVar response
---  where
---    f resp i =
---      let message = ClientSubscribe i resp
---      in (message, OutboundStateNotAcknowledgedSubscribe message resp)
+subscribe :: Client t -> [(Filter, QoS)] -> IO [Maybe QoS]
+subscribe _ [] = pure []
+subscribe client topics = do
+  response <- newEmptyMVar
+  putMVar (clientOutput client) $ Right $ f response
+  takeMVar response
+  where
+    f resp i =
+      let message = ClientSubscribe i topics
+      in (message, OutboundStateNotAcknowledgedSubscribe message resp)
 
 unsubscribe :: Client s -> [Filter] -> IO ()
 unsubscribe _ [] = pure ()
@@ -108,6 +128,23 @@ listenEvents client = listen (clientEventBroadcast client)
 acceptEvents :: BroadcastListener ClientEvent -> IO ClientEvent
 acceptEvents = accept
 
+publish :: Client t -> Topic -> QoS -> Retain -> Payload -> IO ()
+publish client !topic !qos !retain !payload = do
+  case qos of
+    QoS0 -> do
+      pub <- createClientPublish (Duplicate False)
+      putMVar (clientOutput client) $ Left pub
+    QoS1 -> do
+      pub <- createClientPublish (Duplicate True)
+      putMVar (clientOutput client) $ Left pub
+    QoS2 -> do
+      pub <- createClientPublish (Duplicate False)
+      putMVar (clientOutput client) $ Left pub
+  where
+    createClientPublish dup =
+      assignPacketIdentifier client $ \pid ->
+        (ClientPublish pid dup (Message topic qos retain payload), undefined)
+
 -- | TODO: Add.
 sendConnect ::
      (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
@@ -115,16 +152,16 @@ sendConnect ::
   -> a
   -> IO ()
 sendConnect client connection = do
-  conf <- readMVar (clientConfiguration client)
+  clientConf <- readMVar (clientConfiguration client)
   NT.sendChunks connection $
     BS.toLazyByteString $
     clientPacketBuilder
       ClientConnect
       { connectClientIdentifier = clientIdentifier client
       , connectCleanSession = CleanSession False
-      , connectKeepAlive = clientConfigurationKeepAlive conf
-      , connectWill = clientConfigurationWill conf
-      , connectCredentials = undefined
+      , connectKeepAlive = clientConfigurationKeepAlive clientConf
+      , connectWill = clientConfigurationWill clientConf
+      , connectCredentials = createCredential clientConf
       }
 
 -- | TODO: add.
@@ -139,8 +176,8 @@ receiveConnectAcknowledgement session connection = do
   where
     decoder :: BG.Decoder ServerPacket
     decoder = BG.runGetIncremental serverPacketParser
-    decode (BG.Done _leftover consumed clientPacket) input =
-      f clientPacket >> pure (BS.drop (fromIntegral consumed) input)
+    decode (BG.Done _leftover consumed serverPacket) input =
+      f serverPacket >> pure (BS.drop (fromIntegral consumed) input)
     decode (BG.Fail _leftover _consumed err) _ =
       throwIO $ ClientExceptionProtocolViolation err
     decode (BG.Partial _) _ =
@@ -201,14 +238,14 @@ assignPacketIdentifier ::
      Client t
   -> (PacketIdentifier -> (ClientPacket, OutboundState))
   -> IO ClientPacket
-assignPacketIdentifier client x =
+assignPacketIdentifier client outboundF =
   modifyMVar (clientOutboundState client) assign >>= \case
     Just m -> pure m
-    Nothing -> threadDelay 100000 >> assignPacketIdentifier client x
+    Nothing -> threadDelay 100000 >> assignPacketIdentifier client outboundF
   where
     assign im@([], _) = pure (im, Nothing)
     assign (ix:is, m) =
-      let (msg, st) = x (PacketIdentifier ix)
+      let (msg, st) = outboundF (PacketIdentifier ix)
       in pure ((is, IM.insert ix st m), Just msg)
 
 handleOutput ::
@@ -302,7 +339,9 @@ handleInput' client connection input = do
     f _ =
       throwIO $ ClientExceptionProtocolViolation "Unexpected packet type received from the server."
 
-connectTransmitter client connection =
+connectTransmitter :: NT.Connectable a => Client t -> a -> IO ()
+connectTransmitter client connection = do
+  validateClientConfiguration =<< takeMVar (clientConfiguration client)
   NT.connect connection =<< takeMVar undefined
 
 handleConnection ::
@@ -320,7 +359,9 @@ handleConnection (SessionPresent clientSessionPresent) client connection = do
     maintainConnection client connection
 
 run :: (NT.Data a ~ BS.ByteString, NT.Connectable a, NT.StreamConnection a) => Client a -> IO ()
-run client = join (clientConfigurationNewTransceiver <$> readMVar (clientConfiguration client)) >>= handleConnection (SessionPresent False) client
+run client =
+  join (clientConfigurationNewTransceiver <$> readMVar (clientConfiguration client)) >>=
+  handleConnection (SessionPresent False) client
 
 start ::
   (NT.Data a ~ BS.ByteString, NT.StreamConnection a,
