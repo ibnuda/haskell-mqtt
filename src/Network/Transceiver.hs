@@ -10,6 +10,7 @@ import qualified Data.ByteString.Lazy       as BSL
 
 import qualified System.Socket              as S
 import qualified System.Socket.Family.Inet6 as S
+import qualified System.Socket.Family.Inet  as S
 import qualified System.Socket.Type.Stream  as S
 
 import qualified Network.TLS                as TLS
@@ -122,8 +123,16 @@ instance StreamConnection (S.Socket f S.Stream p) where
 instance Connectable (S.Socket S.Inet6 t p) where
   connect = S.connect
 
+instance Connectable (S.Socket S.Inet t p) where
+  connect = S.connect
+
 instance Acceptable (S.Socket S.Inet6 t p) where
   type AcceptedConnection (S.Socket S.Inet6 t p) = S.Socket S.Inet6 t p
+  listen = S.listen
+  accept = S.accept
+
+instance Acceptable (S.Socket S.Inet t p) where
+  type AcceptedConnection (S.Socket S.Inet t p) = S.Socket S.Inet t p
   listen = S.listen
   accept = S.accept
 

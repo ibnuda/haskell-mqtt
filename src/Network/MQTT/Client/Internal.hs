@@ -1,19 +1,20 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE LambdaCase   #-}
-{-# LANGUAGE TypeFamilies #-}
-module Network.MQTT.Client.Internal
-  ( start
-  , stop
-  , subscribe
-  , unsubscribe
-  , publish
-  , validateClientConfiguration
-  , newClient
-  , listenEvents
-  , acceptEvents
-  , ClientConfiguration(..)
-  , Client(..)
-  ) where
+{-# LANGUAGE BangPatterns    #-}
+{-# LANGUAGE LambdaCase      #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
+module Network.MQTT.Client.Internal where
+--( start
+--, stop
+--, subscribe
+--, unsubscribe
+--, publish
+--, validateClientConfiguration
+--, newClient
+--, listenEvents
+--, acceptEvents
+--, ClientConfiguration(..)
+--, Client(..)
+--) where
 
 import           Control.Concurrent
 import           Control.Concurrent.Async
@@ -21,7 +22,7 @@ import           Control.Exception
 import           Control.Monad
 
 import qualified Data.Binary.Get              as BG
-import qualified Data.ByteString              as BS
+import qualified Data.ByteString              as BS hiding (pack)
 import qualified Data.ByteString.Builder      as BS
 import qualified Data.IntMap                  as IM
 import qualified Data.Text                    as T
@@ -261,21 +262,31 @@ handleOutput client connection = do
     (NT.sendChunk connection)
 
 handleInput ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO b
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
+  => Client t
+  -> a
+  -> BS.ByteString
+  -> IO b
 handleInput client connection inp
   | BS.null inp = handleInput' client connection =<< NT.receiveChunk connection
   | otherwise = handleInput' client connection inp
 
 handleInput' ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO b
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
+  => Client t
+  -> a
+  -> BS.ByteString
+  -> IO b
 handleInput' client connection input = do
   decode decoder input
   where
     decoder :: BG.Decoder ServerPacket
     decoder = BG.runGetIncremental serverPacketParser
     decode (BG.Done _leftover consumed clientPacket) inp =
-      f clientPacket >> handleInput' client connection (BS.drop (fromIntegral consumed) inp)
-    decode (BG.Fail _leftover _consumed err) _ = throwIO $ ClientExceptionProtocolViolation err
+      f clientPacket >>
+      handleInput' client connection (BS.drop (fromIntegral consumed) inp)
+    decode (BG.Fail _leftover _consumed err) _ =
+      throwIO $ ClientExceptionProtocolViolation err
     decode (BG.Partial cont) i = do
       continued <- NT.receiveChunk connection
       if BS.null continued
@@ -297,13 +308,19 @@ handleInput' client connection input = do
         case IM.lookup i im of
           Just (OutboundStateNotAcknowledgedPublish _ promise) ->
             putMVar promise () >> pure (i : is, IM.delete i im)
-          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBACK, got something else."
+          _ ->
+            throwIO $
+            ClientExceptionProtocolViolation
+              "Expected PUBACK, got something else."
     f (ServerPublishReceived (PacketIdentifier i)) = do
       modifyMVar_ (clientOutboundState client) $ \(is, im) ->
         case IM.lookup i im of
           Just (OutboundStateNotReceivedPublish _ promise) ->
             pure (is, IM.insert i (OutboundStateNotCompletePublish promise) im)
-          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBREC, got something else."
+          _ ->
+            throwIO $
+            ClientExceptionProtocolViolation
+              "Expected PUBREC, got something else."
     f (ServerPublishRelease (PacketIdentifier i)) = do
       modifyMVar_ (clientInboundState client) $ \im ->
         case IM.lookup i im of
@@ -318,7 +335,10 @@ handleInput' client connection input = do
           Just (OutboundStateNotCompletePublish future) -> do
             putMVar future ()
             pure (i : is, IM.delete i im)
-          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBCOMP, got something else."
+          _ ->
+            throwIO $
+            ClientExceptionProtocolViolation
+              "Expected PUBCOMP, got something else."
     f (ServerSubscribeAcknowledged (PacketIdentifier i) as) =
       modifyMVar_ (clientOutboundState client) $ \p@(is, im) ->
         case IM.lookup i im of
@@ -326,7 +346,10 @@ handleInput' client connection input = do
           Just (OutboundStateNotAcknowledgedSubscribe _ promise) -> do
             putMVar promise as
             pure (i : is, IM.delete i im)
-          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBCOMP, got something else."
+          _ ->
+            throwIO $
+            ClientExceptionProtocolViolation
+              "Expected PUBCOMP, got something else."
     f (ServerUnsubscribeAcknowledged (PacketIdentifier i)) =
       modifyMVar_ (clientOutboundState client) $ \p@(is, im) ->
         case IM.lookup i im of
@@ -334,18 +357,31 @@ handleInput' client connection input = do
           Just (OutboundStateNotAcknowledgedUnsubscribe _ promise) -> do
             putMVar promise ()
             pure (i : is, IM.delete i im)
-          _ -> throwIO $ ClientExceptionProtocolViolation "Expected PUBCOMP, got something else."
+          _ ->
+            throwIO $
+            ClientExceptionProtocolViolation
+              "Expected PUBCOMP, got something else."
     f (ServerPingResponse) = pure ()
     f _ =
-      throwIO $ ClientExceptionProtocolViolation "Unexpected packet type received from the server."
+      throwIO $
+      ClientExceptionProtocolViolation
+        "Unexpected packet type received from the server."
 
-connectTransmitter :: NT.Connectable a => Client t -> a -> IO ()
+connectTransmitter ::
+     (NT.Address a ~ ClientConfiguration t, NT.Connectable a)
+  => Client t
+  -> a
+  -> IO ()
 connectTransmitter client connection = do
-  validateClientConfiguration =<< takeMVar (clientConfiguration client)
-  NT.connect connection =<< takeMVar undefined
+  validateClientConfiguration =<< readMVar (clientConfiguration client)
+  NT.connect connection =<< readMVar (clientConfiguration client)
 
 handleConnection ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a, NT.Connectable a)
+     ( NT.Address a ~ ClientConfiguration t
+     , NT.Data a ~ BS.ByteString
+     , NT.StreamConnection a
+     , NT.Connectable a
+     )
   => SessionPresent
   -> Client t
   -> a
@@ -358,15 +394,27 @@ handleConnection (SessionPresent clientSessionPresent) client connection = do
   receiveConnectAcknowledgement clientSessionPresent connection >>=
     maintainConnection client connection
 
-run :: (NT.Data a ~ BS.ByteString, NT.Connectable a, NT.StreamConnection a) => Client a -> IO ()
+run ::
+     ( NT.Data a ~ BS.ByteString
+     , NT.Address a ~ ClientConfiguration a
+     , NT.Connectable a
+     , NT.StreamConnection a
+     )
+  => Client a
+  -> IO ()
 run client =
-  join (clientConfigurationNewTransceiver <$> readMVar (clientConfiguration client)) >>=
+  join
+    (clientConfigurationNewTransceiver <$> readMVar (clientConfiguration client)) >>=
   handleConnection (SessionPresent False) client
 
 start ::
-  (NT.Data a ~ BS.ByteString, NT.StreamConnection a,
-   NT.Connectable a) =>
-  Client a -> IO ()
+     ( NT.Address a ~ ClientConfiguration a
+     , NT.Data a ~ BS.ByteString
+     , NT.StreamConnection a
+     , NT.Connectable a
+     )
+  => Client a
+  -> IO ()
 start client = modifyMVar_ (clientThreads client) $ \p ->
   poll p >>= \case
     Nothing -> pure p
