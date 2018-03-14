@@ -2,19 +2,19 @@
 {-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies    #-}
-module Network.MQTT.Client.Internal where
---( start
---, stop
---, subscribe
---, unsubscribe
---, publish
---, validateClientConfiguration
---, newClient
---, listenEvents
---, acceptEvents
---, ClientConfiguration(..)
---, Client(..)
---) where
+module Network.MQTT.Client.Internal
+  ( start
+  , stop
+  , subscribe
+  , unsubscribe
+  , publish
+  , validateClientConfiguration
+  , newClient
+  , listenEvents
+  , acceptEvents
+  , ClientConfiguration(..)
+  , Client(..)
+  ) where
 
 import           Control.Concurrent
 import           Control.Concurrent.Async
@@ -147,11 +147,7 @@ publish client !topic !qos !retain !payload = do
         (ClientPublish pid dup (Message topic qos retain payload), undefined)
 
 -- | TODO: Add.
-sendConnect ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
-  => Client t
-  -> a
-  -> IO ()
+sendConnect :: (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> IO ()
 sendConnect client connection = do
   clientConf <- readMVar (clientConfiguration client)
   NT.sendChunks connection $
@@ -167,10 +163,7 @@ sendConnect client connection = do
 
 -- | TODO: add.
 receiveConnectAcknowledgement ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
-  => Bool
-  -> a
-  -> IO BS.ByteString
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Bool -> a -> IO BS.ByteString
 receiveConnectAcknowledgement session connection = do
   bs <- NT.receiveChunk connection
   decode decoder bs
@@ -197,16 +190,12 @@ receiveConnectAcknowledgement session connection = do
       ClientExceptionProtocolViolation $ "Expected CONNACK got something else."
 
 maintainConnection ::
-     (NT.Data a ~ BS.ByteString, NT.Connectable a, NT.StreamConnection a)
-  => Client t1
-  -> a
-  -> BS.ByteString
-  -> IO ()
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO ()
 maintainConnection client connection inp =
   keepAlive client `race_` handleOutput client connection `race_`
   (handleInput client connection inp `catch` \e -> print (e :: SomeException))
 
-keepAlive :: Client t -> IO ()
+keepAlive :: Client t -> IO b
 keepAlive client = do
   interval <-
     (500000 *) . fromIntegral . clientConfigurationKeepAlive <$>
@@ -228,17 +217,11 @@ getMaybeMessage client =
     Nothing -> pure Nothing
     Just emsg -> Just <$> takeMessage client emsg
 
-takeMessage ::
-     Client t
-  -> (Either ClientPacket (PacketIdentifier -> (ClientPacket, OutboundState)))
-  -> IO ClientPacket
+takeMessage :: Client t -> Either a (PacketIdentifier -> (a, OutboundState)) -> IO a
 takeMessage _ (Left msg)        = pure msg
 takeMessage client (Right imsg) = assignPacketIdentifier client imsg
 
-assignPacketIdentifier ::
-     Client t
-  -> (PacketIdentifier -> (ClientPacket, OutboundState))
-  -> IO ClientPacket
+assignPacketIdentifier :: Client t -> (PacketIdentifier -> (b, OutboundState)) -> IO b
 assignPacketIdentifier client outboundF =
   modifyMVar (clientOutboundState client) assign >>= \case
     Just m -> pure m
@@ -249,11 +232,7 @@ assignPacketIdentifier client outboundF =
       let (msg, st) = outboundF (PacketIdentifier ix)
       in pure ((is, IM.insert ix st m), Just msg)
 
-handleOutput ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a, NT.Connectable a)
-  => Client t
-  -> a
-  -> IO ()
+handleOutput :: (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> IO ()
 handleOutput client connection = do
   bufferedOutput
     connection
@@ -262,21 +241,13 @@ handleOutput client connection = do
     (NT.sendChunk connection)
 
 handleInput ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
-  => Client t
-  -> a
-  -> BS.ByteString
-  -> IO b
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO b
 handleInput client connection inp
   | BS.null inp = handleInput' client connection =<< NT.receiveChunk connection
   | otherwise = handleInput' client connection inp
 
 handleInput' ::
-     (NT.Data a ~ BS.ByteString, NT.StreamConnection a)
-  => Client t
-  -> a
-  -> BS.ByteString
-  -> IO b
+     (NT.Data a ~ BS.ByteString, NT.StreamConnection a) => Client t -> a -> BS.ByteString -> IO b
 handleInput' client connection input = do
   decode decoder input
   where
@@ -368,7 +339,12 @@ handleInput' client connection input = do
         "Unexpected packet type received from the server."
 
 connectTransmitter ::
-     (NT.Address a ~ ClientConfiguration t, NT.Connectable a)
+     ( NT.Address a ~ ClientConfiguration t
+     , NT.Connectable a
+     , NT.Closable a
+     , NT.StreamConnection a
+     , NT.Data a ~ BS.ByteString
+     )
   => Client t
   -> a
   -> IO ()
@@ -377,10 +353,11 @@ connectTransmitter client connection = do
   NT.connect connection =<< readMVar (clientConfiguration client)
 
 handleConnection ::
-     ( NT.Address a ~ ClientConfiguration t
-     , NT.Data a ~ BS.ByteString
+     ( NT.Data a ~ BS.ByteString
+     , NT.Address a ~ ClientConfiguration t
      , NT.StreamConnection a
      , NT.Connectable a
+     , NT.Closable a
      )
   => SessionPresent
   -> Client t
@@ -395,10 +372,11 @@ handleConnection (SessionPresent clientSessionPresent) client connection = do
     maintainConnection client connection
 
 run ::
-     ( NT.Data a ~ BS.ByteString
-     , NT.Address a ~ ClientConfiguration a
+     ( NT.Address a ~ ClientConfiguration a
+     , NT.Data a ~ BS.ByteString
      , NT.Connectable a
      , NT.StreamConnection a
+     , NT.Closable a
      )
   => Client a
   -> IO ()
@@ -408,8 +386,8 @@ run client =
   handleConnection (SessionPresent False) client
 
 start ::
-     ( NT.Address a ~ ClientConfiguration a
-     , NT.Data a ~ BS.ByteString
+     ( NT.Data a ~ BS.ByteString
+     , NT.Address a ~ ClientConfiguration a
      , NT.StreamConnection a
      , NT.Connectable a
      )
